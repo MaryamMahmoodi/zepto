@@ -111,7 +111,7 @@ var Zepto = (function() {
     dom.selector = selector || '';
     return dom;
   }
-
+ 
   function $(selector, context){
     if (!selector) return Z();
     if (context !== undefined) return $(context).find(selector);
@@ -380,7 +380,7 @@ var Zepto = (function() {
       };
     },
     css: function(property, value){
-      if (value === undefined && typeof property == 'string') {
+      if (value === undefined && typeof property == 'string') { // not work !!
         return(
           this.length == 0
             ? undefined
@@ -972,6 +972,8 @@ window.Zepto = Zepto;
     context: null,
     // Whether to trigger "global" Ajax events
     global: true,
+	// Asynchronous flag
+	async: true,
     // Transport
     xhr: function () {
       return new window.XMLHttpRequest();
@@ -1071,7 +1073,7 @@ window.Zepto = Zepto;
     if (mime) baseHeaders['Accept'] = mime;
     settings.headers = $.extend(baseHeaders, settings.headers || {});
 
-    xhr.onreadystatechange = function(){
+    var readystatechange = function(){
       if (xhr.readyState == 4) {
         clearTimeout(abortTimeout);
         var result, error = false;
@@ -1082,15 +1084,15 @@ window.Zepto = Zepto;
           }
           else result = xhr.responseText;
           if (error) ajaxError(error, 'parsererror', xhr, settings);
-          else ajaxSuccess(result, xhr, settings);
+          else return settings.async?ajaxSuccess(result, xhr, settings):result;
         } else {
           ajaxError(null, 'error', xhr, settings);
         }
       }
-    };
-
-    xhr.open(settings.type, settings.url, true);
-
+    }; settings.async && xhr.onreadystatechange = readystatechange;
+	
+    xhr.open(settings.type, settings.url, settings.async);
+	
     if (settings.contentType) settings.headers['Content-Type'] = settings.contentType;
     for (name in settings.headers) xhr.setRequestHeader(name, settings.headers[name]);
 
@@ -1098,7 +1100,7 @@ window.Zepto = Zepto;
       xhr.abort();
       return false;
     }
-
+	
     if (settings.timeout > 0) abortTimeout = setTimeout(function(){
         xhr.onreadystatechange = empty;
         xhr.abort();
@@ -1106,6 +1108,9 @@ window.Zepto = Zepto;
       }, settings.timeout);
 
     xhr.send(settings.data);
+	
+	if(!settings.async) return readystatechange();
+	
     return xhr;
   };
 
@@ -1340,7 +1345,7 @@ window.Zepto = Zepto;
     else if (this.length) {
       var event = $.Event('submit');
       this.eq(0).trigger(event);
-      if (!event.defaultPrevented) this.get(0).submit()
+      if (!event.defaultPrevented) this.get(0).submit();
     }
     return this;
   }
@@ -1399,13 +1404,12 @@ window.Zepto = Zepto;
       } else if ('last' in touch) {
         touchTimeout = setTimeout(function(){
           touchTimeout = null;
-          $(touch.target).trigger('tap')
+          $(touch.target).trigger('tap');
           touch = {};
         }, 250);
       }
     }).bind('touchcancel', function(){ touch = {} });
   });
-
   ['swipe', 'swipeLeft', 'swipeRight', 'swipeUp', 'swipeDown', 'doubleTap', 'tap', 'longTap'].forEach(function(m){
     $.fn[m] = function(callback){ return this.bind(m, callback) }
   });

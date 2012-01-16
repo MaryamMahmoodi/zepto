@@ -348,7 +348,7 @@ var Zepto = (function() {
       };
     },
     css: function(property, value){
-      if (value === undefined && typeof property == 'string') {
+      if (value === undefined && typeof property == 'string') { // Bug : not work in $(p).css('color:red'); !!!
         return(
           this.length == 0
             ? undefined
