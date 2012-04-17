@@ -1,201 +1,128 @@
-require 'rake/packagetask'
+ZEPTO_VERSION = '1.0rc1'
 
-ZEPTO_VERSION  = "0.8"
+DEFAULT_MODULES = %w[ polyfill zepto event detect fx ajax form touch ]
 
-ZEPTO_ROOT     = File.expand_path(File.dirname(__FILE__))
-ZEPTO_SRC_DIR  = File.join(ZEPTO_ROOT, 'src')
-ZEPTO_DIST_DIR = File.join(ZEPTO_ROOT, 'dist')
-ZEPTO_PKG_DIR  = File.join(ZEPTO_ROOT, 'pkg')
+KILO = 1024   # how many bytes in a "kilobyte"
 
-ZEPTO_COMPONENTS = [
-  'polyfill',
-  'zepto',
-  'event',
-  'detect',
-  'fx',
-  # 'fx_methods',
-  'ajax',
-  'form',
-  # 'assets',
-  # 'data',
-  'touch',
-  # 'gesture'
-]
+task :default => :dist
 
-task :default => [:clean, :concat, :dist]
+# module-aware file task
+class BuildTask < Rake::FileTask
+  def modules
+    prerequisites.map {|f| File.basename(f, '.js') }
+  end
 
-ZEPTO_TESTS = %w[
-  test/zepto.html
-  test/ajax.html
-  test/data.html
-  test/detect.html
-  test/form.html
-  test/fx.html
-  test/polyfill.html
-]
+  def remove_prerequisites to_remove
+    @prerequisites -= to_remove
+    return self
+  end
 
-desc "Clean the distribution directory."
-task :clean do
-  rm_rf ZEPTO_DIST_DIR
-  mkdir ZEPTO_DIST_DIR
+  def modules_mismatch?
+    File.open(name, 'r') {|f| f.gets } !~ /modules: ([\w,\s]+)/ or
+      $1.split(/\W+/) != modules
+  end
+
+  def needed?() super or modules_mismatch? end
 end
 
-def normalize_whitespace(filename)
-  contents = File.readlines(filename)
-  contents.each { |line| line.sub!(/\s+$/, "") }
-  File.open(filename, "w") do |file|
-    file.write contents.join("\n").sub(/(\n+)?\Z/m, "\n")
+BuildTask.define_task 'dist/zepto.js' => DEFAULT_MODULES.map {|m| "src/#{m}.js" } do |task|
+  mkdir_p 'dist', :verbose => false
+  File.open(task.name, 'w') do |zepto|
+    zepto.puts "/* Zepto %s - %s - zeptojs.com/license */" %
+                [version_string, task.modules.join(' ')]
+
+    task.prerequisites.each do |src|
+      # bring in source files one by one, but without copyright info
+      copyright = true
+      File.open(src).each_line do |line|
+        copyright = false if copyright and line !~ %r{^(/|\s*$)}
+        zepto.puts line unless copyright
+      end
+    end
   end
 end
 
-desc "Strip trailing whitespace and ensure each file ends with a newline"
-task :whitespace do
-  Dir["*", "src/**/*", "test/**/*", "examples/**/*"].each do |filename|
-    normalize_whitespace(filename) if File.file?(filename)
+file 'dist/zepto.min.js' => 'dist/zepto.js' do |task|
+  begin require 'uglifier'
+  rescue LoadError; fail "Uglifier not available: #{$!}"
+  else
+    File.open(task.name, 'w') do |min|
+      min << Uglifier.new.compile(File.read(task.prerequisites.first))
+    end
+  end
+end
+
+file 'dist/zepto.min.gz' => 'dist/zepto.min.js' do |task|
+  verbose false do
+    tmp_file = task.name.sub('.gz', '')
+    cp task.prerequisites.first, tmp_file
+    sh 'gzip', '--best', tmp_file
   end
 end
 
 desc "Concatenate source files to build zepto.js"
-task :concat, [:addons] => :whitespace do |task, args|
-  # colon-separated arguments such as `concat[foo:bar:-baz]` specify
-  # which components to add or exclude, depending on if it starts with "-"
-  add, exclude = args[:addons].to_s.split(':').partition {|c| c !~ /^-/ }
-  exclude.each {|c| c.sub!('-', '') }
-  components = (ZEPTO_COMPONENTS | add) - exclude
+task :concat, [:modules] do |task, args|
+  modules = args[:modules].to_s.split(':')
+  to_add, to_exclude = modules.partition {|m| m.sub!(/^(-)?(.+)/, 'src/\2.js'); !$1 }
 
-  unless components == ZEPTO_COMPONENTS
-    puts "Building zepto.js by including: #{components.join(', ')}"
+  Rake::Task['dist/zepto.js'].
+    remove_prerequisites(to_exclude).enhance(to_add).
+    invoke
+end
+
+desc "Generate zepto.js distribution files and report size statistics"
+task :dist => ['dist/zepto.js', 'dist/zepto.min.js', 'dist/zepto.min.gz'] do |task|
+  orig_size, min_size, gz_size = task.prerequisites.map {|f| File.size(f) }
+
+  puts "Original version: %.3fk" % (orig_size.to_f / KILO)
+  puts "Minified: %.3fk" % (min_size.to_f / KILO)
+  puts "Minified and gzipped: %.3fk, compression factor %.3f" % [gz_size.to_f / KILO, orig_size.to_f / gz_size]
+
+  rm_f 'dist/zepto.min.gz', :verbose => false
+end
+
+task(:clean) { rm_rf 'dist' }
+
+desc "Run tests with PhantomJS"
+task :test do
+  sh 'script/test'
+  Rake::Task[:check_whitespace].invoke
+end
+
+desc "Strip trailing whitespace and ensure each file ends with a newline"
+task :whitespace do
+  verbose false do
+    files = Dir['{src,test,examples}/**/*.{js,html}']
+    ruby(*%w'-p -i -e $_.sub!(/\s*\Z/,"\n")'.concat(files))
   end
+end
 
-  File.open(File.join(ZEPTO_DIST_DIR, 'zepto.js'), 'w') do |f|
-    f.puts components.map { |component|
-      File.read File.join(ZEPTO_SRC_DIR, "#{component}.js")
-    }
+desc "Checks for trailing whitespace in source files and tests"
+task :check_whitespace do
+  flunked = false
+  flunk = lambda {|file, num| flunked = true; puts "#{file}:#{num}" }
+  Dir['{src,test,examples}/**/*.{js,html}'].each do |file|
+    File.open(file, 'r') {|f| f.each_with_index {|ln, num| flunk.call(file, num + 1) if ln.chomp =~ /\s+$/ } }
+  end
+  fail if flunked
+end
+
+desc "Generate docco documentation from source files"
+task :docco do
+  verbose false do
+    sh 'docco', *Dir['src/*.js']
   end
 end
 
-def google_compiler(src, target)
-  puts "Minifying #{src} with Google Closure Compiler..."
-  `java -jar vendor/google-compiler/compiler.jar --js #{src} --summary_detail_level 3 --js_output_file #{target}`
-end
-
-def yui_compressor(src, target)
-  puts "Minifying #{src} with YUI Compressor..."
-  `java -jar vendor/yuicompressor/yuicompressor-2.4.2.jar #{src} -o #{target}`
-end
-
-def uglifyjs(src, target)
-  begin
-    require 'uglifier'
-  rescue LoadError => e
-    if verbose
-      puts "\nYou'll need the 'uglifier' gem for minification. Just run:\n\n"
-      puts "  $ gem install uglifier"
-      puts "\nand you should be all set.\n\n"
-      exit
-    end
-    return false
-  end
-  puts "Minifying #{src} with UglifyJS..."
-  File.open(target, "w"){|f| f.puts Uglifier.new.compile(File.read(src))}
-end
-
-def process_minified(src, target)
-  cp target, File.join(ZEPTO_DIST_DIR,'temp.js')
-  msize = File.size(File.join(ZEPTO_DIST_DIR,'temp.js'))
-  `gzip -9 #{File.join(ZEPTO_DIST_DIR,'temp.js')}`
-
-  osize = File.size(src)
-  dsize = File.size(File.join(ZEPTO_DIST_DIR,'temp.js.gz'))
-  rm_rf File.join(ZEPTO_DIST_DIR,'temp.js.gz')
-
-  puts "Original version: %.3fk" % (osize/1024.0)
-  puts "Minified: %.3fk" % (msize/1024.0)
-  puts "Minified and gzipped: %.3fk, compression factor %.3f" % [dsize/1024.0, osize/dsize.to_f]
-end
-
-desc "Generates a minified version for distribution, using UglifyJS."
-task :dist do
-  src, target = File.join(ZEPTO_DIST_DIR,'zepto.js'), File.join(ZEPTO_DIST_DIR,'zepto.min.js')
-  uglifyjs src, target
-  process_minified src, target
-end
-
-desc "Generates a minified version for distribution using the Google Closure compiler."
-task :googledist do
-  src, target = File.join(ZEPTO_DIST_DIR,'zepto.js'), File.join(ZEPTO_DIST_DIR,'zepto.min.js')
-  google_compiler src, target
-  process_minified src, target
-end
-
-desc "Generates a minified version for distribution using the YUI compressor."
-task :yuidist do
-  src, target = File.join(ZEPTO_DIST_DIR,'zepto.js'), File.join(ZEPTO_DIST_DIR,'zepto.min.js')
-  yui_compressor src, target
-  process_minified src, target
-end
-
-desc "Generate docco documentation from sources."
-task :docs do
-  puts "Generating docs..."
-  puts "Note: to work, install node.js first, then install docco with 'sudo npm install docco -g'."
-  puts `docco src/*`
-end
-
-Rake::PackageTask.new('zepto', ZEPTO_VERSION) do |package|
-  package.need_tar_gz = true
-  package.need_zip = true
-  package.package_dir = ZEPTO_PKG_DIR
-  package.package_files.include(
-    'README.md',
-    'MIT-LICENSE',
-    'dist/**/*',
-    'src/**/*',
-    'test/**/*',
-    'vendor/evidence.js',
-    'examples/**/*'
-  ).exclude(*`git ls-files -o test src examples -z`.split("\0"))
-end
-
-desc "Run tests in headless WebKit"
-task :test => "jasmine:headless" do
-  require 'rubygems'
-  require 'rubygems/specification'
-
-  # HACK: jasmine-headless-webkit doesn't let us access its compiled specrunner directly
-  if jasmine_gem = Gem::Specification.find_by_name('jasmine-headless-webkit')
-    headless_root = jasmine_gem.full_gem_path
-    runner = File.join(headless_root, 'ext/jasmine-webkit-specrunner/jasmine-webkit-specrunner')
-
-    exec runner, '-c', *ZEPTO_TESTS
+# Zepto version number + git sha if available
+def version_string
+  desc = `git describe --tags HEAD 2>&1`.chomp
+  if $?.success?
+    desc
   else
-    abort "Can't find 'jasmine-headless-webkit' gem"
-  end
-end
-
-def silence_warnings
-  require 'stringio'
-  begin
-    old_stderr = $stderr
-    $stderr = StringIO.new
-    yield
-  ensure
-    $stderr = old_stderr
-  end
-end
-
-begin
-  silence_warnings {
-    require 'jasmine'
-    load 'jasmine/tasks/jasmine.rake'
-    require 'jasmine/headless/task'
-  }
-
-  Jasmine::Headless::Task.new do |task|
-    task.colors = true
-  end
-rescue LoadError
-  task :jasmine do
-    abort "Jasmine is not available. In order to run jasmine, you must: (sudo) gem install jasmine"
+    suffix, dir = '', File.basename(Dir.pwd)
+    # detect git sha from directory name of GitHub zip/tarball
+    suffix = "-g#{$1}" if dir =~ /^madrobby-zepto-([a-f0-9]{7,40})$/
+    ZEPTO_VERSION + suffix
   end
 end
